@@ -508,3 +508,103 @@ async function sendEmailNotification(hotspot: Hotspot) {
   });
 }
 ```
+
+---
+
+## 8. 全网搜索 API
+
+实现文件：`server/src/services/searchOrchestrator.ts`、`server/src/routes/search.ts`
+
+与定时监控（`hotspotChecker`）共用 AI 分析能力。搜索策略：**每源 1 条、最多 4 条**，并行抓取 + 并行 AI，总超时 **60s**。
+
+| 参数 | 值 |
+|------|-----|
+| 数据源 | **Bing + HN + 搜狗 + Twitter(lite)** |
+| 每源展示 | **1 条** |
+| 返回条数 | **最多 4 条** |
+| 总超时 | **60s**（无内部硬截止） |
+| 单源抓取超时 | **25s** |
+| AI 调用 | **最多 4 次并行**，不设单条 AI 硬超时 |
+
+### 8.1 全网搜索
+
+**Endpoint:** `POST /api/search`
+
+**请求体：**
+
+```json
+{
+  "query": "Cursor AI",
+  "sources": ["bing", "hackernews", "sogou", "twitter"]
+}
+```
+
+- `sources` 可选，默认上述 4 源
+- **每源只返回 1 条** AI 分析结果
+- 总超时 **60 秒**，AI 并行分析不设单条硬超时
+
+**响应示例：**
+
+```json
+{
+  "query": "Cursor AI",
+  "results": [
+    {
+      "id": "bing:https://...",
+      "title": "...",
+      "content": "...",
+      "url": "https://...",
+      "source": "bing",
+      "isReal": true,
+      "relevance": 85,
+      "relevanceReason": "...",
+      "keywordMentioned": true,
+      "importance": "high",
+      "summary": "此内容与【Cursor AI】的关联：...",
+      "analyzed": true,
+      "sortScore": 72.5,
+      "createdAt": "2026-05-20T12:00:00.000Z",
+      "keyword": null
+    }
+  ],
+  "meta": {
+    "totalFetched": 45,
+    "totalUnique": 38,
+    "totalAnalyzed": 8,
+    "highQualityCount": 5,
+    "timedOut": false,
+    "completedSources": ["Bing", "HackerNews", "Sogou", "Twitter"],
+    "failedSources": ["Sogou"],
+    "lowRelevanceCount": 5,
+    "durationMs": 28500
+  }
+}
+```
+
+**排序公式（`sortScore`）：**
+
+- `relevance × 0.65` + 重要性加权 + 来源优先级 + 互动热度
+- 未 AI 分析的条目 `sortScore` 会降权，排在已分析结果之后
+
+**兼容旧路径：** `POST /api/hotspots/search` 与上述逻辑一致。
+
+### 8.2 搜索建议
+
+**Endpoint:** `GET /api/search/suggest?q=Cur&limit=8`
+
+服务端返回监控关键词、热点标题前缀匹配建议。**搜索历史**由前端 `localStorage`（`hotpulse_search_history`）维护，优先级：历史 > 监控词 > 本接口。
+
+```json
+{
+  "suggestions": ["Cursor", "Cursor 2.0 Agent"]
+}
+```
+
+### 8.3 前端集成要点
+
+| 能力 | 实现 |
+|------|------|
+| 搜索历史 | `client/src/utils/searchHistory.ts`，最多 50 条 |
+| 自动补全 | 输入防抖 300ms，合并本地 + `GET /suggest` |
+| 低相关折叠 | `relevance < 40` 默认折叠，可展开 |
+| 进度提示 | Toast：搜索开始 / 完成或超时 |

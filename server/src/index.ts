@@ -8,6 +8,7 @@ import cron from 'node-cron';
 import { prisma } from './db.js';
 import keywordsRouter from './routes/keywords.js';
 import hotspotsRouter from './routes/hotspots.js';
+import searchRouter from './routes/search.js';
 import settingsRouter from './routes/settings.js';
 import notificationsRouter from './routes/notifications.js';
 import { runHotspotCheck } from './jobs/hotspotChecker.js';
@@ -30,6 +31,7 @@ app.use(express.json());
 // Routes
 app.use('/api/keywords', keywordsRouter);
 app.use('/api/hotspots', hotspotsRouter);
+app.use('/api/search', searchRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/notifications', notificationsRouter);
 

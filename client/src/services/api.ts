@@ -133,8 +133,9 @@ export const hotspotsApi = {
   
   getById: (id: string) => request<Hotspot>(`/hotspots/${id}`),
   
+  /** @deprecated 请使用 searchApi.search */
   search: (query: string, sources?: string[]) => 
-    request<{ results: Hotspot[] }>('/hotspots/search', {
+    request<WebSearchResponse>('/hotspots/search', {
       method: 'POST',
       body: JSON.stringify({ query, sources })
     }),
@@ -184,3 +185,40 @@ export const settingsApi = {
 // Manual trigger
 export const triggerHotspotCheck = () => 
   request<{ message: string }>('/check-hotspots', { method: 'POST' });
+
+export interface SearchResultItem extends Hotspot {
+  analyzed?: boolean;
+  sortScore?: number;
+}
+
+export interface WebSearchMeta {
+  totalFetched: number;
+  totalUnique: number;
+  totalAnalyzed: number;
+  highQualityCount: number;
+  timedOut: boolean;
+  completedSources: string[];
+  failedSources: string[];
+  lowRelevanceCount: number;
+  durationMs: number;
+}
+
+export interface WebSearchResponse {
+  query: string;
+  results: SearchResultItem[];
+  meta: WebSearchMeta;
+}
+
+export const LOW_RELEVANCE_THRESHOLD = 40;
+
+// 全网搜索 API
+export const searchApi = {
+  search: (query: string, sources?: string[]) =>
+    request<WebSearchResponse>('/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, sources })
+    }),
+
+  suggest: (q: string, limit = 8) =>
+    request<{ suggestions: string[] }>(`/search/suggest?q=${encodeURIComponent(q)}&limit=${limit}`)
+};

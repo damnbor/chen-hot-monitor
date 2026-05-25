@@ -183,55 +183,18 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// 手动搜索热点
+// 手动搜索热点（兼容旧路径，逻辑与 POST /api/search 一致）
 router.post('/search', async (req, res) => {
   try {
-    const { query, sources = ['twitter', 'bing'] } = req.body;
+    const { query, sources } = req.body;
 
-    if (!query) {
+    if (!query || typeof query !== 'string' || !query.trim()) {
       return res.status(400).json({ error: 'Query is required' });
     }
 
-    // 导入搜索服务
-    const { searchTwitter } = await import('../services/twitter.js');
-    const { searchBing } = await import('../services/search.js');
-    const { analyzeContent } = await import('../services/ai.js');
-
-    const results: any[] = [];
-
-    // Twitter 搜索
-    if (sources.includes('twitter')) {
-      try {
-        const tweets = await searchTwitter(query);
-        results.push(...tweets);
-      } catch (error) {
-        console.error('Twitter search failed:', error);
-      }
-    }
-
-    // Bing 搜索
-    if (sources.includes('bing')) {
-      try {
-        const webResults = await searchBing(query);
-        results.push(...webResults);
-      } catch (error) {
-        console.error('Bing search failed:', error);
-      }
-    }
-
-    // AI 分析前几个结果
-    const analyzedResults = await Promise.all(
-      results.slice(0, 10).map(async (item) => {
-        try {
-          const analysis = await analyzeContent(item.title + ' ' + item.content, query);
-          return { ...item, analysis };
-        } catch {
-          return { ...item, analysis: null };
-        }
-      })
-    );
-
-    res.json({ results: analyzedResults });
+    const { runWebSearch } = await import('../services/searchOrchestrator.js');
+    const result = await runWebSearch(query.trim(), { sources });
+    res.json(result);
   } catch (error) {
     console.error('Error searching hotspots:', error);
     res.status(500).json({ error: 'Failed to search hotspots' });

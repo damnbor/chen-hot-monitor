@@ -115,6 +115,47 @@ export function preMatchKeyword(text: string, expandedKeywords: string[]): { mat
 
 // ========== AI 内容分析（关键词感知） ==========
 
+/** 容错解析 AI 返回的 JSON（处理 em dash、非数字 relevance 等） */
+function parseAnalysisResponse(responseContent: string): Record<string, unknown> | null {
+  const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  let jsonStr = jsonMatch[0]
+    .replace(/[\u2014\u2013—–]/g, '-')
+    .replace(/,\s*}/g, '}')
+    .replace(/,\s*]/g, ']');
+
+  try {
+    return JSON.parse(jsonStr) as Record<string, unknown>;
+  } catch {
+    // 修复 "relevance": — 或 "relevance": xxx 等非数字值
+    jsonStr = jsonStr.replace(
+      /"relevance"\s*:\s*(?!-?\d)([^,}\]]+)/gi,
+      '"relevance": 0'
+    );
+    jsonStr = jsonStr.replace(
+      /"relevance"\s*:\s*-+(?=[,}\]])/g,
+      '"relevance": 0'
+    );
+    try {
+      return JSON.parse(jsonStr) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function parseRelevance(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && !Number.isNaN(value)) {
+    return Math.min(100, Math.max(0, value));
+  }
+  if (typeof value === 'string') {
+    const num = parseInt(value.replace(/\D/g, ''), 10);
+    if (!Number.isNaN(num)) return Math.min(100, Math.max(0, num));
+  }
+  return fallback;
+}
+
 function buildAnalysisPrompt(keyword: string, preMatchResult: { matched: boolean; matchedTerms: string[] }): string {
   const matchHint = preMatchResult.matched 
     ? `\n注意：文本预匹配发现内容中包含以下关键词变体：${preMatchResult.matchedTerms.join('、')}` 
@@ -185,18 +226,17 @@ export async function analyzeContent(content: string, keyword: string, preMatchR
 
     const rawContent = result.choices[0]?.message?.content || '';
     const responseContent = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
-    
-    // 尝试解析 JSON
-    const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
+
+    const parsed = parseAnalysisResponse(responseContent);
+    if (parsed) {
+      const fallbackRelevance = matchResult.matched ? 30 : 10;
       return {
         isReal: Boolean(parsed.isReal),
-        relevance: Math.min(100, Math.max(0, Number(parsed.relevance) || 0)),
+        relevance: parseRelevance(parsed.relevance, fallbackRelevance),
         relevanceReason: String(parsed.relevanceReason || '').slice(0, 200),
         keywordMentioned: Boolean(parsed.keywordMentioned),
-        importance: ['low', 'medium', 'high', 'urgent'].includes(parsed.importance) 
-          ? parsed.importance 
+        importance: ['low', 'medium', 'high', 'urgent'].includes(String(parsed.importance))
+          ? (parsed.importance as AIAnalysis['importance'])
           : 'low',
         summary: String(parsed.summary || '').slice(0, 150)
       };

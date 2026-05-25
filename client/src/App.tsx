@@ -10,8 +10,14 @@ import {
 } from 'lucide-react';
 import { 
   keywordsApi, hotspotsApi, notificationsApi, triggerHotspotCheck,
-  type Keyword, type Hotspot, type Stats, type Notification
+  searchApi, LOW_RELEVANCE_THRESHOLD,
+  type Keyword, type Hotspot, type Stats, type Notification,
+  type SearchResultItem, type WebSearchMeta
 } from './services/api';
+import {
+  getSearchHistory, addSearchHistory, removeSearchHistory, clearSearchHistory,
+  getHistorySuggestions, type SearchHistoryEntry
+} from './utils/searchHistory';
 import { onNewHotspot, onNotification, subscribeToKeywords } from './services/socket';
 import { cn } from './lib/utils';
 import { Spotlight } from './components/ui/spotlight';
@@ -63,7 +69,12 @@ function App() {
   const [searchFilters, setSearchFilters] = useState<FilterState>({ ...defaultFilterState });
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [searchResults, setSearchResults] = useState<Hotspot[]>([]);
+  const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
+  const [searchMeta, setSearchMeta] = useState<WebSearchMeta | null>(null);
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [lowRelevanceExpanded, setLowRelevanceExpanded] = useState(false);
   // 展开/折叠状态
   const [expandedReasons, setExpandedReasons] = useState<Set<string>>(new Set());
   const [expandedContents, setExpandedContents] = useState<Set<string>>(new Set());
@@ -119,6 +130,61 @@ function App() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (activeTab === 'search') {
+      setSearchHistory(getSearchHistory());
+    }
+  }, [activeTab]);
+
+  // 搜索建议：历史 > 监控词 > 服务端热点标题
+  useEffect(() => {
+    if (activeTab !== 'search') return;
+
+    const q = searchQuery.trim();
+    if (q.length < 1) {
+      setSuggestions(getHistorySuggestions('', 8));
+      return;
+    }
+
+    const historySugs = getHistorySuggestions(q, 8);
+    const keywordSugs = keywords
+      .map(k => k.text)
+      .filter(text => text.toLowerCase().includes(q.toLowerCase()))
+      .slice(0, 5);
+
+    const merged = new Set<string>();
+    const local: string[] = [];
+    for (const s of [...historySugs, ...keywordSugs]) {
+      const key = s.toLowerCase();
+      if (!merged.has(key)) {
+        merged.add(key);
+        local.push(s);
+      }
+    }
+    setSuggestions(local);
+
+    const timer = setTimeout(async () => {
+      if (q.length < 2) return;
+      try {
+        const { suggestions: remote } = await searchApi.suggest(q, 8);
+        const combined = new Set<string>(local.map(s => s.toLowerCase()));
+        const next = [...local];
+        for (const s of remote) {
+          const key = s.toLowerCase();
+          if (!combined.has(key)) {
+            combined.add(key);
+            next.push(s);
+          }
+        }
+        setSuggestions(next.slice(0, 10));
+      } catch {
+        // 保持本地建议
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, keywords, activeTab]);
 
   // WebSocket 事件
   useEffect(() => {
@@ -180,21 +246,54 @@ function App() {
     }
   };
 
-  // 手动搜索
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchQuery.trim()) return;
+  // 全网搜索
+  const handleSearch = async (e?: React.FormEvent, overrideQuery?: string) => {
+    e?.preventDefault();
+    const q = (overrideQuery ?? searchQuery).trim();
+    if (!q) return;
 
+    setSearchQuery(q);
+    setShowSuggestions(false);
+    setLowRelevanceExpanded(false);
     setIsLoading(true);
+    showToast('正在搜索并 AI 分析，请稍候（最长 60 秒）…', 'success');
+
     try {
-      const result = await hotspotsApi.search(searchQuery);
+      const result = await searchApi.search(q);
       setSearchResults(result.results);
-      showToast(`找到 ${result.results.length} 条结果`, 'success');
+      setSearchMeta(result.meta);
+
+      addSearchHistory({
+        query: q,
+        resultCount: result.results.length,
+        timedOut: result.meta.timedOut,
+        completedSources: result.meta.completedSources
+      });
+      setSearchHistory(getSearchHistory());
+
+      if (result.meta.timedOut) {
+        const sources = result.meta.completedSources.join('、') || '无';
+        showToast(
+          `搜索超时（60s），已返回 ${result.results.length} 条结果。完成源：${sources}`,
+          'error'
+        );
+      } else {
+        showToast(
+          `找到 ${result.results.length} 条结果（高相关 ${result.meta.highQualityCount} 条，AI 分析 ${result.meta.totalAnalyzed} 条）`,
+          'success'
+        );
+      }
     } catch (error) {
       showToast('搜索失败', 'error');
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const applySuggestion = (text: string) => {
+    setSearchQuery(text);
+    setShowSuggestions(false);
+    void handleSearch(undefined, text);
   };
 
   // 手动触发检查
@@ -288,6 +387,86 @@ function App() {
 
     return results;
   }, [searchResults, searchFilters]);
+
+  const { highRelevanceSearchResults, lowRelevanceSearchResults } = useMemo(() => {
+    const high = filteredSearchResults.filter(h => h.relevance >= LOW_RELEVANCE_THRESHOLD);
+    const low = filteredSearchResults.filter(h => h.relevance < LOW_RELEVANCE_THRESHOLD);
+    return { highRelevanceSearchResults: high, lowRelevanceSearchResults: low };
+  }, [filteredSearchResults]);
+
+  const renderSearchResultCard = (hotspot: SearchResultItem, i: number) => {
+    const heatScore = calcHeatScore(hotspot);
+    const heat = getHeatLevel(heatScore);
+    return (
+      <motion.div
+        key={hotspot.id}
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: i * 0.03 }}
+        className="group p-5 rounded-2xl bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 transition-all"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <span className={cn(
+                "px-2.5 py-1 rounded-lg text-[10px] font-semibold uppercase flex items-center",
+                hotspot.importance === 'urgent' && "bg-red-500/15 text-red-400 border border-red-500/20",
+                hotspot.importance === 'high' && "bg-orange-500/15 text-orange-400 border border-orange-500/20",
+                hotspot.importance === 'medium' && "bg-amber-500/15 text-amber-400 border border-amber-500/20",
+                hotspot.importance === 'low' && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
+              )}>
+                {getImportanceIcon(hotspot.importance)}
+                <span className="ml-1">{hotspot.importance}</span>
+              </span>
+              <span className="flex items-center gap-1 text-xs text-slate-600">
+                {getSourceIcon(hotspot.source)}
+                {getSourceLabel(hotspot.source)}
+              </span>
+              {!hotspot.analyzed && (
+                <span className="text-[10px] px-2 py-0.5 rounded-md bg-slate-500/10 text-slate-500 border border-white/10">
+                  未 AI 分析
+                </span>
+              )}
+              {!hotspot.isReal && (
+                <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
+                  <ShieldAlert className="w-3 h-3" />
+                  可疑
+                </span>
+              )}
+              <span className={cn("flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-white/5 border border-white/10 font-medium", heat.color)}>
+                <ThermometerSun className="w-3 h-3" />
+                {heat.label} {heatScore}
+              </span>
+            </div>
+            <h3 className="font-medium text-white mb-2 group-hover:text-blue-400 transition-colors">{hotspot.title}</h3>
+            {hotspot.summary && (
+              <div className="mb-2">
+                <span className="text-[10px] text-blue-400/60 font-medium mr-1.5">AI 摘要</span>
+                <span className="text-sm text-slate-500">{hotspot.summary}</span>
+              </div>
+            )}
+            {hotspot.relevanceReason && (
+              <p className="text-xs text-slate-600 mb-2 line-clamp-2">{hotspot.relevanceReason}</p>
+            )}
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+              <span className="flex items-center gap-1">
+                <Target className="w-3.5 h-3.5" />
+                相关性 {hotspot.relevance}%
+              </span>
+            </div>
+          </div>
+          <a
+            href={hotspot.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 px-4 py-2 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 text-sm font-medium transition-all"
+          >
+            查看
+          </a>
+        </div>
+      </motion.div>
+    );
+  };
 
   const getImportanceIcon = (importance: string) => {
     switch (importance) {
@@ -978,14 +1157,36 @@ function App() {
             <form onSubmit={handleSearch} className="p-5 rounded-2xl bg-white/[0.02] border border-white/5">
               <div className="flex gap-3">
                 <div className="flex-1 relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-600" />
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-600 z-10" />
                   <input
                     type="text"
                     value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="搜索热点内容..."
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      setShowSuggestions(true);
+                    }}
+                    onFocus={() => setShowSuggestions(true)}
+                    onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                    placeholder="全网搜索：输入关键词…"
+                    autoComplete="off"
                     className="w-full pl-12 pr-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/20 transition-all"
                   />
+                  {showSuggestions && suggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 top-full mt-2 z-20 rounded-xl border border-white/10 bg-[#0a0a1a]/95 backdrop-blur-xl shadow-2xl overflow-hidden">
+                      {suggestions.map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => applySuggestion(s)}
+                          className="w-full text-left px-4 py-2.5 text-sm text-slate-300 hover:bg-white/5 hover:text-white transition-colors flex items-center gap-2"
+                        >
+                          <Search className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+                          <span className="truncate">{s}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <motion.button 
                   type="submit" 
@@ -1002,7 +1203,71 @@ function App() {
                   搜索
                 </motion.button>
               </div>
+
+              {/* 最近搜索 */}
+              {searchHistory.length > 0 ? (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="mt-4 flex flex-wrap items-center gap-2"
+                >
+                  <span className="text-xs text-slate-600 shrink-0">最近搜索</span>
+                  {searchHistory.slice(0, 8).map((h) => (
+                    <button
+                      key={`${h.query}-${h.timestamp}`}
+                      type="button"
+                      onClick={() => applySuggestion(h.query)}
+                      className="group flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-white/20 transition-all"
+                    >
+                      <Clock className="w-3 h-3 opacity-60" />
+                      {h.query}
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeSearchHistory(h.query);
+                          setSearchHistory(getSearchHistory());
+                        }}
+                        className="opacity-0 group-hover:opacity-100 hover:text-red-400 ml-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </span>
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearSearchHistory();
+                      setSearchHistory([]);
+                    }}
+                    className="text-xs text-slate-600 hover:text-red-400 transition-colors"
+                  >
+                    清空
+                  </button>
+                </motion.div>
+              ) : (
+                <p className="mt-4 text-xs text-slate-600">
+                  暂无搜索历史，完成一次搜索后将显示在这里
+                </p>
+              )}
             </form>
+
+            {searchMeta && (
+              <div className="text-xs text-slate-600 px-1 flex flex-wrap gap-x-4 gap-y-1">
+                <span>抓取 {searchMeta.totalFetched} 条 · 去重 {searchMeta.totalUnique} 条 · AI 分析 {searchMeta.totalAnalyzed} 条 · 高相关 {searchMeta.highQualityCount} 条</span>
+                <span>耗时 {(searchMeta.durationMs / 1000).toFixed(1)}s</span>
+                {searchMeta.completedSources.length > 0 && (
+                  <span>完成源：{searchMeta.completedSources.join('、')}</span>
+                )}
+                {searchMeta.failedSources.length > 0 && (
+                  <span className="text-amber-500/80">失败源：{searchMeta.failedSources.join('、')}</span>
+                )}
+                {searchMeta.timedOut && (
+                  <span className="text-red-400">已超时，结果为部分数据</span>
+                )}
+              </div>
+            )}
 
             {/* Search Filter & Sort Bar */}
             <FilterSortBar
@@ -1019,98 +1284,27 @@ function App() {
                   <p className="text-sm text-slate-600 mt-1">尝试调整筛选条件</p>
                 </div>
               )}
-              {filteredSearchResults.map((hotspot, i) => {
-                const heatScore = calcHeatScore(hotspot);
-                const heat = getHeatLevel(heatScore);
-                return (
-                <motion.div 
-                  key={hotspot.id} 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.03 }}
-                  className="group p-5 rounded-2xl bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 transition-all"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 mb-3">
-                        <span className={cn(
-                          "px-2.5 py-1 rounded-lg text-[10px] font-semibold uppercase flex items-center",
-                          hotspot.importance === 'urgent' && "bg-red-500/15 text-red-400 border border-red-500/20",
-                          hotspot.importance === 'high' && "bg-orange-500/15 text-orange-400 border border-orange-500/20",
-                          hotspot.importance === 'medium' && "bg-amber-500/15 text-amber-400 border border-amber-500/20",
-                          hotspot.importance === 'low' && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
-                        )}>
-                          {getImportanceIcon(hotspot.importance)}
-                          <span className="ml-1">{hotspot.importance}</span>
-                        </span>
-                        <span className="flex items-center gap-1 text-xs text-slate-600">
-                          {getSourceIcon(hotspot.source)}
-                          {getSourceLabel(hotspot.source)}
-                        </span>
-                        {!hotspot.isReal && (
-                          <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
-                            <ShieldAlert className="w-3 h-3" />
-                            可疑
-                          </span>
-                        )}
-                        <span className={cn("flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-white/5 border border-white/10 font-medium", heat.color)}>
-                          <ThermometerSun className="w-3 h-3" />
-                          {heat.label} {heatScore}
-                        </span>
-                      </div>
-                      <h3 className="font-medium text-white mb-2 group-hover:text-blue-400 transition-colors">{hotspot.title}</h3>
-                      {hotspot.summary && (
-                        <div className="mb-2">
-                          <span className="text-[10px] text-blue-400/60 font-medium mr-1.5">AI 摘要</span>
-                          <span className="text-sm text-slate-500">{hotspot.summary}</span>
-                        </div>
-                      )}
-                      {hotspot.authorName && (
-                        <div className="flex items-center gap-2 mb-2">
-                          <User className="w-4 h-4 text-slate-600" />
-                          <span className="text-xs text-slate-400">{hotspot.authorName}</span>
-                          {hotspot.authorVerified && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">✓ 认证</span>
-                          )}
-                        </div>
-                      )}
-                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
-                        <span className="flex items-center gap-1">
-                          <Target className="w-3.5 h-3.5" />
-                          相关性 {hotspot.relevance}%
-                        </span>
-                        {hotspot.likeCount != null && hotspot.likeCount > 0 && (
-                          <span className="flex items-center gap-1" title="点赞">
-                            <Zap className="w-3.5 h-3.5" />
-                            {hotspot.likeCount.toLocaleString()}
-                          </span>
-                        )}
-                        {hotspot.viewCount != null && hotspot.viewCount > 0 && (
-                          <span className="flex items-center gap-1" title="浏览量">
-                            <Eye className="w-3.5 h-3.5" />
-                            {hotspot.viewCount.toLocaleString()}
-                          </span>
-                        )}
-                      </div>
-                      {hotspot.publishedAt && (
-                        <div className="flex items-center gap-1 text-[11px] text-slate-600 mt-1" title={formatDateTime(hotspot.publishedAt)}>
-                          <Clock className="w-3 h-3" />
-                          发布 {relativeTime(hotspot.publishedAt)}
-                        </div>
+              {highRelevanceSearchResults.map((hotspot, i) => renderSearchResultCard(hotspot, i))}
+
+              {lowRelevanceSearchResults.length > 0 && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setLowRelevanceExpanded(!lowRelevanceExpanded)}
+                    className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-300 transition-colors mb-3"
+                  >
+                    {lowRelevanceExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    低相关结果（相关性 &lt; {LOW_RELEVANCE_THRESHOLD}%，{lowRelevanceSearchResults.length} 条）
+                  </button>
+                  {lowRelevanceExpanded && (
+                    <div className="space-y-3 opacity-80">
+                      {lowRelevanceSearchResults.map((hotspot, i) =>
+                        renderSearchResultCard(hotspot, i)
                       )}
                     </div>
-                    <a
-                      href={hotspot.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="shrink-0 px-4 py-2 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 text-sm font-medium transition-all"
-                    >
-                      查看
-                    </a>
-                  </div>
-                </motion.div>
-                );
-              })}
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}

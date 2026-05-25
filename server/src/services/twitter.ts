@@ -134,18 +134,18 @@ async function fetchTweetPage(
 //   Top: 拉取 2 页（≤40 条高质量热门推文）
 //   Latest: 拉取 1 页（≤20 条最新推文）
 // ============================================================
-export async function searchTwitter(query: string): Promise<SearchResult[]> {
+export async function searchTwitter(
+  query: string,
+  options?: { maxResults?: number; lite?: boolean }
+): Promise<SearchResult[]> {
+  const maxResults = options?.maxResults;
+  const lite = options?.lite ?? false;
+
   try {
     const topQuery = buildAdvancedQuery(query, 'Top');
     const latestQuery = buildAdvancedQuery(query, 'Latest');
 
-    console.log(`Twitter advanced queries:\n  Top: ${topQuery}\n  Latest: ${latestQuery}`);
-
-    // 第 1 批：Top 第 1 页 + Latest 第 1 页（并行）
-    const [topPage1, latestPage1] = await Promise.allSettled([
-      fetchTweetPage(topQuery, 'Top'),
-      fetchTweetPage(latestQuery, 'Latest')
-    ]);
+    console.log(`Twitter advanced queries:\n  Top: ${topQuery}${lite ? '' : `\n  Latest: ${latestQuery}`}`);
 
     const allTweets: Tweet[] = [];
     const seenIds = new Set<string>();
@@ -159,33 +159,47 @@ export async function searchTwitter(query: string): Promise<SearchResult[]> {
       }
     };
 
-    let topNextCursor: string | undefined;
+    if (lite) {
+      const topPage1 = await fetchTweetPage(topQuery, 'Top');
+      addTweets(topPage1.tweets);
+      console.log(`Twitter (lite): ${allTweets.length} tweets fetched (Top 1 page)`);
+    } else {
+      // 第 1 批：Top 第 1 页 + Latest 第 1 页（并行）
+      const [topPage1, latestPage1] = await Promise.allSettled([
+        fetchTweetPage(topQuery, 'Top'),
+        fetchTweetPage(latestQuery, 'Latest')
+      ]);
 
-    if (topPage1.status === 'fulfilled') {
-      addTweets(topPage1.value.tweets);
-      topNextCursor = topPage1.value.nextCursor;
-    }
-    if (latestPage1.status === 'fulfilled') {
-      addTweets(latestPage1.value.tweets);
-    }
+      let topNextCursor: string | undefined;
 
-    // 第 2 批：如果 Top 有下一页，再拉一页（多拿一些热门内容）
-    if (topNextCursor) {
-      try {
-        const topPage2 = await fetchTweetPage(topQuery, 'Top', topNextCursor);
-        addTweets(topPage2.tweets);
-      } catch (e) {
-        console.warn('Twitter Top page 2 failed:', e);
+      if (topPage1.status === 'fulfilled') {
+        addTweets(topPage1.value.tweets);
+        topNextCursor = topPage1.value.nextCursor;
       }
-    }
+      if (latestPage1.status === 'fulfilled') {
+        addTweets(latestPage1.value.tweets);
+      }
 
-    console.log(`Twitter: ${allTweets.length} unique tweets fetched (Top 2 pages + Latest 1 page)`);
+      // 第 2 批：如果 Top 有下一页，再拉一页（多拿一些热门内容）
+      if (topNextCursor) {
+        try {
+          const topPage2 = await fetchTweetPage(topQuery, 'Top', topNextCursor);
+          addTweets(topPage2.tweets);
+        } catch (e) {
+          console.warn('Twitter Top page 2 failed:', e);
+        }
+      }
+
+      console.log(`Twitter: ${allTweets.length} unique tweets fetched (Top 2 pages + Latest 1 page)`);
+    }
 
     // 本地质量过滤 & 排序
     const qualityTweets = filterAndRankTweets(allTweets);
     console.log(`Twitter: ${allTweets.length} → ${qualityTweets.length} after quality filter (likes≥${TWITTER_FILTER_CONFIG.minLikes}, RT≥${TWITTER_FILTER_CONFIG.minRetweets}, views≥${TWITTER_FILTER_CONFIG.minViews}, followers≥${TWITTER_FILTER_CONFIG.minFollowers}, no replies)`);
 
-    return qualityTweets.map((tweet: Tweet) => ({
+    const limitedTweets = maxResults ? qualityTweets.slice(0, maxResults) : qualityTweets;
+
+    return limitedTweets.map((tweet: Tweet) => ({
       title: tweet.text.slice(0, 100),
       content: tweet.text,
       url: tweet.url,
