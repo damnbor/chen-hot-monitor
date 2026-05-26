@@ -137,8 +137,8 @@
 ### 1. 克隆并安装依赖
 
 ```bash
-git clone https://github.com/liyupi/yupi-hot-monitor.git
-cd yupi-hot-monitor
+git clone https://github.com/damnbor/chen-hot-monitor.git
+cd chen-hot-monitor
 
 # 后端
 cd server

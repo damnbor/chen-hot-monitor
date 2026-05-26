@@ -19,8 +19,8 @@
 ## 第一步：克隆项目
 
 ```bash
-git clone https://github.com/liyupi/yupi-hot-monitor.git
-cd yupi-hot-monitor
+git clone https://github.com/damnbor/chen-hot-monitor.git
+cd chen-hot-monitor
 ```
 
 > 如果 GitHub 访问较慢，可以在 Gitee 上导入仓库后克隆。
