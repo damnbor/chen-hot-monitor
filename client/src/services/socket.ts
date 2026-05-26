@@ -52,6 +52,8 @@ export interface NotificationEvent {
   content: string;
   hotspotId?: string;
   importance?: string;
+  count?: number;
+  hotspotIds?: string[];
 }
 
 export function onNewHotspot(callback: (hotspot: HotspotEvent) => void): () => void {

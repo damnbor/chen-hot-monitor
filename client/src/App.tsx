@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Flame, Search, Plus, Bell, Trash2, 
-  ExternalLink, RefreshCw, X, Check, AlertTriangle,
+  ExternalLink, RefreshCw, X, Check, AlertTriangle, Pause,
   Zap, TrendingUp, Twitter, Globe, Eye, Activity, Clock, Target,
   ChevronLeft, ChevronRight,
   MessageCircle, Repeat2, Quote, User, Shield, ShieldAlert,
@@ -10,9 +10,10 @@ import {
 } from 'lucide-react';
 import { 
   keywordsApi, hotspotsApi, notificationsApi, triggerHotspotCheck,
+  pauseHotspotCheck, getHotspotScanStatus,
   searchApi, LOW_RELEVANCE_THRESHOLD,
   type Keyword, type Hotspot, type Stats, type Notification,
-  type SearchResultItem, type WebSearchMeta
+  type SearchResultItem, type WebSearchMeta, type HotspotScanState,
 } from './services/api';
 import {
   getSearchHistory, addSearchHistory, removeSearchHistory, clearSearchHistory,
@@ -62,6 +63,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
+  const [scanState, setScanState] = useState<HotspotScanState | null>(null);
   const [showNotifications, setShowNotifications] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'keywords' | 'search'>('dashboard');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -131,6 +133,42 @@ function App() {
     loadData();
   }, [loadData]);
 
+  // 恢复扫描状态（刷新页面后仍显示「扫描中」）
+  useEffect(() => {
+    getHotspotScanStatus()
+      .then((state) => {
+        setScanState(state);
+        setIsChecking(state.status === 'running');
+      })
+      .catch(() => {});
+  }, []);
+
+  // 轮询扫描状态
+  useEffect(() => {
+    if (!isChecking) return;
+
+    const poll = async () => {
+      try {
+        const state = await getHotspotScanStatus();
+        setScanState(state);
+        if (state.status !== 'running') {
+          setIsChecking(false);
+          loadData();
+          if (state.status === 'paused') {
+            showToast(`扫描已暂停，已发现 ${state.newHotspotsFound} 条新热点`, 'success');
+          } else if (state.status === 'completed') {
+            showToast(`扫描完成，发现 ${state.newHotspotsFound} 条新热点`, 'success');
+          }
+        }
+      } catch {
+        // 忽略轮询错误
+      }
+    };
+
+    const timer = setInterval(poll, 1500);
+    return () => clearInterval(timer);
+  }, [isChecking, loadData]);
+
   useEffect(() => {
     if (activeTab === 'search') {
       setSearchHistory(getSearchHistory());
@@ -190,11 +228,14 @@ function App() {
   useEffect(() => {
     const unsubHotspot = onNewHotspot((hotspot) => {
       setHotspots(prev => [hotspot as Hotspot, ...prev.slice(0, 19)]);
-      showToast('发现新热点: ' + hotspot.title.slice(0, 30), 'success');
-      loadData();
     });
 
-    const unsubNotif = onNotification(() => {
+    const unsubNotif = onNotification((notif) => {
+      if (notif.type === 'hotspot_digest') {
+        showToast(notif.content || `发现 ${notif.count ?? ''} 条新热点`, 'success');
+        loadData();
+        return;
+      }
       setUnreadCount(prev => prev + 1);
     });
 
@@ -296,17 +337,27 @@ function App() {
     void handleSearch(undefined, text);
   };
 
-  // 手动触发检查
+  // 手动触发 / 暂停检查
   const handleManualCheck = async () => {
-    setIsChecking(true);
+    if (isChecking) {
+      try {
+        const res = await pauseHotspotCheck();
+        setScanState(res.state);
+        showToast('正在暂停扫描…', 'success');
+      } catch (error) {
+        showToast('暂停失败', 'error');
+      }
+      return;
+    }
+
     try {
-      await triggerHotspotCheck();
-      showToast('热点检查已触发', 'success');
-      setTimeout(loadData, 5000);
-    } catch (error) {
-      showToast('触发失败', 'error');
-    } finally {
-      setIsChecking(false);
+      const res = await triggerHotspotCheck();
+      setScanState(res.state);
+      setIsChecking(true);
+      showToast('热点检查已启动', 'success');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : '触发失败';
+      showToast(message, 'error');
     }
   };
 
@@ -554,19 +605,32 @@ function App() {
             <div className="flex items-center gap-3">
               <motion.button
                 onClick={handleManualCheck}
-                disabled={isChecking}
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 className={cn(
                   "px-4 py-2.5 rounded-xl text-sm font-medium flex items-center gap-2 transition-all",
-                  isChecking 
-                    ? "bg-blue-500/20 text-blue-400 cursor-wait"
+                  isChecking
+                    ? "bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25"
                     : "bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40"
                 )}
               >
-                <RefreshCw className={cn("w-4 h-4", isChecking && "animate-spin")} />
-                {isChecking ? '扫描中' : '立即扫描'}
+                {isChecking ? (
+                  <>
+                    <Pause className="w-4 h-4" />
+                    {scanState?.pauseRequested ? '暂停中…' : '暂停扫描'}
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4" />
+                    立即扫描
+                  </>
+                )}
               </motion.button>
+              {isChecking && scanState?.currentKeyword && (
+                <span className="hidden sm:inline text-xs text-slate-500 max-w-[140px] truncate">
+                  正在扫描: {scanState.currentKeyword}
+                </span>
+              )}
 
               {/* Notifications */}
               <div className="relative">

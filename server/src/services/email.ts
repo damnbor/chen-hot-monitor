@@ -112,18 +112,25 @@ export async function sendHotspotEmail(hotspot: Hotspot & { keyword?: { text: st
   }
 }
 
-export async function sendDigestEmail(hotspots: Hotspot[]): Promise<boolean> {
+export async function sendDigestEmail(
+  hotspots: Hotspot[],
+  options?: { windowMinutes?: number }
+): Promise<boolean> {
   const mailer = getTransporter();
   
   if (!mailer || !process.env.NOTIFY_EMAIL || hotspots.length === 0) {
     return false;
   }
 
+  const windowLabel = options?.windowMinutes
+    ? `${options.windowMinutes} 分钟`
+    : '汇总';
+
   try {
     const hotspotsHtml = hotspots.map(h => `
       <tr>
         <td style="padding: 10px; border-bottom: 1px solid #eee;">
-          <a href="${h.url}" style="color: #667eea; text-decoration: none;">${h.title.slice(0, 60)}...</a>
+          <a href="${h.url}" style="color: #667eea; text-decoration: none;">${h.title.slice(0, 60)}${h.title.length > 60 ? '...' : ''}</a>
         </td>
         <td style="padding: 10px; border-bottom: 1px solid #eee;">${h.source}</td>
         <td style="padding: 10px; border-bottom: 1px solid #eee;">${h.importance}</td>
@@ -133,14 +140,14 @@ export async function sendDigestEmail(hotspots: Hotspot[]): Promise<boolean> {
     await mailer.sendMail({
       from: process.env.SMTP_USER,
       to: process.env.NOTIFY_EMAIL,
-      subject: `📊 热点监控日报 - ${hotspots.length} 条新热点`,
+      subject: `📊 热点监控汇总 - ${hotspots.length} 条高重要性热点 (${windowLabel})`,
       html: `
         <!DOCTYPE html>
         <html>
         <head><meta charset="utf-8"></head>
         <body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif;">
-          <h1>📊 热点监控日报</h1>
-          <p>过去 24 小时发现 <strong>${hotspots.length}</strong> 条新热点</p>
+          <h1>📊 热点监控汇总</h1>
+          <p>${windowLabel}内发现 <strong>${hotspots.length}</strong> 条高重要性热点（high / urgent）</p>
           <table style="width: 100%; border-collapse: collapse;">
             <thead>
               <tr style="background: #f8f9fa;">

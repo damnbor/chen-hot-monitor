@@ -4,8 +4,25 @@ import { searchTwitter } from '../services/twitter.js';
 import { searchBing, searchHackerNews, deduplicateResults } from '../services/search.js';
 import { searchSogou, searchBilibili, searchWeibo, detectAndFetchAccount } from '../services/chinaSearch.js';
 import { analyzeContent, expandKeyword, preMatchKeyword } from '../services/ai.js';
-import { sendHotspotEmail } from '../services/email.js';
+import { enqueueHotspotNotification } from '../services/notificationAggregator.js';
+import {
+  shouldAbortManualScan,
+  updateScanProgress,
+  finishScan,
+  abortScanOnError,
+  getScanState,
+} from '../services/scanState.js';
 import type { SearchResult } from '../types.js';
+
+export interface HotspotCheckOptions {
+  manual?: boolean;
+}
+
+export interface HotspotCheckResult {
+  paused: boolean;
+  newHotspotsCount: number;
+  keywordsProcessed: number;
+}
 
 // 新鲜度过滤：丢弃超过指定小时数的内容
 // Twitter 层面已通过 since: 限制了时间范围，这里只做兜底
@@ -37,25 +54,40 @@ function prioritizeResults(results: SearchResult[]): SearchResult[] {
   });
 }
 
-export async function runHotspotCheck(io: Server): Promise<void> {
-  console.log('🔍 Starting hotspot check...');
-
-  // 获取所有激活的关键词
-  const keywords = await prisma.keyword.findMany({
-    where: { isActive: true }
-  });
-
-  if (keywords.length === 0) {
-    console.log('No active keywords to monitor');
-    return;
-  }
-
-  console.log(`Checking ${keywords.length} keywords...`);
+export async function runHotspotCheck(
+  io: Server,
+  options: HotspotCheckOptions = {}
+): Promise<HotspotCheckResult> {
+  const manual = options.manual ?? false;
+  console.log(`🔍 Starting hotspot check${manual ? ' (manual)' : ''}...`);
 
   let newHotspotsCount = 0;
+  let keywordsProcessed = 0;
+  let paused = false;
 
-  for (const keyword of keywords) {
-    console.log(`\n📎 Checking keyword: "${keyword.text}"`);
+  try {
+    const keywords = await prisma.keyword.findMany({
+      where: { isActive: true },
+    });
+
+    if (keywords.length === 0) {
+      console.log('No active keywords to monitor');
+      finishScan({ paused: false, newHotspotsFound: 0, keywordsProcessed: 0 });
+      return { paused: false, newHotspotsCount: 0, keywordsProcessed: 0 };
+    }
+
+    updateScanProgress({ keywordsTotal: keywords.length, keywordsProcessed: 0, newHotspotsFound: 0 });
+    console.log(`Checking ${keywords.length} keywords...`);
+
+    for (const keyword of keywords) {
+      if (manual && shouldAbortManualScan()) {
+        paused = true;
+        console.log('⏸ Manual scan paused by user');
+        break;
+      }
+
+      updateScanProgress({ currentKeyword: keyword.text, keywordsProcessed });
+      console.log(`\n📎 Checking keyword: "${keyword.text}"`);
 
     try {
       // 第一步：检测关键词是否为某个平台账号
@@ -122,6 +154,12 @@ export async function runHotspotCheck(io: Server): Promise<void> {
       const sortedResults = prioritizeResults(freshResults);
       console.log(`  Total: ${allResults.length} raw → ${uniqueResults.length} unique → ${freshResults.length} fresh (within ${MAX_AGE_HOURS}h)`);
 
+      if (manual && shouldAbortManualScan()) {
+        paused = true;
+        console.log('⏸ Manual scan paused by user');
+        break;
+      }
+
       // 处理结果：Twitter 优先多给配额
       // Twitter 最多处理 15 条，其他来源共享 10 条配额
       let twitterProcessed = 0;
@@ -130,6 +168,12 @@ export async function runHotspotCheck(io: Server): Promise<void> {
       const OTHER_QUOTA = 10;
 
       for (const item of sortedResults) {
+        if (manual && shouldAbortManualScan()) {
+          paused = true;
+          console.log('⏸ Manual scan paused by user');
+          break;
+        }
+
         // 检查配额
         if (item.source === 'twitter' && twitterProcessed >= TWITTER_QUOTA) continue;
         if (item.source !== 'twitter' && otherProcessed >= OTHER_QUOTA) continue;
@@ -207,45 +251,42 @@ export async function runHotspotCheck(io: Server): Promise<void> {
           newHotspotsCount++;
           if (item.source === 'twitter') twitterProcessed++;
           else otherProcessed++;
+          updateScanProgress({ newHotspotsFound: newHotspotsCount });
           console.log(`  ✅ New hotspot [${item.source}]: ${hotspot.title.slice(0, 40)}... (${analysis.importance})`);
 
-          // 创建通知
-          await prisma.notification.create({
-            data: {
-              type: 'hotspot',
-              title: `发现新热点: ${hotspot.title.slice(0, 50)}`,
-              content: analysis.summary || hotspot.content.slice(0, 100),
-              hotspotId: hotspot.id
-            }
-          });
-
-          // WebSocket 通知
-          io.to(`keyword:${keyword.text}`).emit('hotspot:new', hotspot);
-          io.emit('notification', {
-            type: 'hotspot',
-            title: '发现新热点',
-            content: hotspot.title,
-            hotspotId: hotspot.id,
-            importance: hotspot.importance
-          });
-
-          // 邮件通知（仅对高重要级别）
-          if (['high', 'urgent'].includes(analysis.importance)) {
-            await sendHotspotEmail(hotspot);
-          }
+          // 入队聚合通知（UI 5 分钟 / 邮件 30 分钟）；hotspot:new 仍实时推送列表
+          await enqueueHotspotNotification(hotspot, io);
 
         } catch (error) {
           console.error(`  Error processing result:`, error);
         }
       }
 
+      if (paused) break;
+
       // 避免过快请求
       await new Promise(resolve => setTimeout(resolve, 2000));
+      keywordsProcessed++;
 
     } catch (error) {
       console.error(`Error checking keyword "${keyword.text}":`, error);
+      keywordsProcessed++;
     }
   }
 
-  console.log(`\n✨ Hotspot check completed. Found ${newHotspotsCount} new hotspots.`);
+    if (paused) {
+      console.log(`\n⏸ Hotspot check paused. Found ${newHotspotsCount} new hotspots (${keywordsProcessed}/${keywords.length} keywords).`);
+    } else {
+      console.log(`\n✨ Hotspot check completed. Found ${newHotspotsCount} new hotspots.`);
+    }
+
+    finishScan({ paused, newHotspotsFound: newHotspotsCount, keywordsProcessed });
+    io.emit('scan:status', getScanState());
+
+    return { paused, newHotspotsCount, keywordsProcessed };
+  } catch (error) {
+    abortScanOnError();
+    io.emit('scan:status', getScanState());
+    throw error;
+  }
 }

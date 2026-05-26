@@ -182,9 +182,27 @@ export const settingsApi = {
     })
 };
 
-// Manual trigger
-export const triggerHotspotCheck = () => 
-  request<{ message: string }>('/check-hotspots', { method: 'POST' });
+// Manual hotspot scan (async, pausable)
+export interface HotspotScanState {
+  status: 'idle' | 'running' | 'paused' | 'completed';
+  manual: boolean;
+  pauseRequested: boolean;
+  currentKeyword: string | null;
+  keywordsTotal: number;
+  keywordsProcessed: number;
+  newHotspotsFound: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export const triggerHotspotCheck = () =>
+  request<{ message: string; state: HotspotScanState }>('/check-hotspots', { method: 'POST' });
+
+export const pauseHotspotCheck = () =>
+  request<{ message: string; state: HotspotScanState }>('/check-hotspots/pause', { method: 'POST' });
+
+export const getHotspotScanStatus = () =>
+  request<HotspotScanState>('/check-hotspots/status');
 
 export interface SearchResultItem extends Hotspot {
   analyzed?: boolean;

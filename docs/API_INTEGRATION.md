@@ -478,36 +478,58 @@ async function checkHotspots() {
 
 ---
 
-## 7. 邮件通知配置
+## 7. 通知聚合与邮件
+
+实现文件：`server/src/services/notificationAggregator.ts`、`server/src/services/email.ts`
+
+发现新热点后**不再逐条推送通知/邮件**，而是入队后按**滚动窗口**聚合：
+
+| 通道 | 窗口 | 行为 |
+|------|------|------|
+| `hotspot:new` (WebSocket) | 无 | **实时**更新前端热点列表，不 Toast |
+| UI 通知 + Toast | **5 分钟**（默认） | 窗口到期后 1 条 `hotspot_digest` 通知 |
+| SMTP 邮件 | **30 分钟**（默认） | 窗口到期后 1 封汇总邮件，**仅 high / urgent** |
+
+环境变量（`server/.env`）：
+
+```env
+NOTIFICATION_UI_WINDOW_MINUTES=5
+NOTIFICATION_EMAIL_WINDOW_MINUTES=30
+```
+
+### 7.1 聚合流程
 
 ```typescript
-import nodemailer from 'nodemailer';
+// hotspotChecker：热点入库后
+await enqueueHotspotNotification(hotspot, io);
+// → 立即 emit hotspot:new（列表实时）
+// → 写入 NotificationQueue，等待窗口 flush
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-});
-
-async function sendEmailNotification(hotspot: Hotspot) {
-  await transporter.sendMail({
-    from: process.env.SMTP_USER,
-    to: process.env.NOTIFY_EMAIL,
-    subject: `🔥 新热点: ${hotspot.title}`,
-    html: `
-      <h2>${hotspot.title}</h2>
-      <p>${hotspot.summary}</p>
-      <p><strong>重要程度:</strong> ${hotspot.importance}</p>
-      <p><strong>相关性:</strong> ${hotspot.relevance}%</p>
-      <p><a href="${hotspot.url}">查看原文</a></p>
-    `
-  });
-}
+// index.ts：每分钟检查 + 启动时 flush
+cron.schedule('* * * * *', () => tryFlushNotificationWindows(io));
 ```
+
+### 7.2 WebSocket 聚合通知事件
+
+```typescript
+io.emit('notification', {
+  type: 'hotspot_digest',
+  title: '热点汇总',
+  content: '5 分钟内发现 3 条新热点',
+  count: 3,
+  hotspotIds: ['uuid-1', 'uuid-2', 'uuid-3']
+});
+```
+
+前端收到 `hotspot_digest` 后：Toast 一次 + 刷新通知列表。
+
+### 7.3 邮件汇总
+
+```typescript
+await sendDigestEmail(highUrgentHotspots, { windowMinutes: 30 });
+```
+
+仅包含窗口内 `importance` 为 `high` 或 `urgent` 的热点。
 
 ---
 

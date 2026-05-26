@@ -55,12 +55,21 @@ model Hotspot {
 
 model Notification {
   id        String   @id @default(uuid())
-  type      String   // hotspot, alert
+  type      String   // hotspot, hotspot_digest, alert
   title     String
   content   String
   isRead    Boolean  @default(false)
   hotspotId String?
   createdAt DateTime @default(now())
+}
+
+model NotificationQueue {
+  id           String   @id @default(uuid())
+  hotspotId    String   @unique
+  importance   String
+  enqueuedAt   DateTime @default(now())
+  uiFlushed    Boolean  @default(false)
+  emailFlushed Boolean  @default(false)
 }
 
 model Setting {
