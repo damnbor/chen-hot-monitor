@@ -37,10 +37,12 @@ vi.mock('../services/email.js', () => ({
 import {
   isWindowExpired,
   buildDigestTitle,
+  buildManualDigestTitle,
   buildDigestContent,
   isEmailEligible,
   tryFlushUiWindow,
   tryFlushEmailWindow,
+  flushManualScanUiNotifications,
   UI_WINDOW_MS,
   EMAIL_WINDOW_MS,
 } from '../services/notificationAggregator.js';
@@ -60,6 +62,10 @@ describe('notificationAggregator helpers', () => {
 
   it('buildDigestTitle formats count and window', () => {
     expect(buildDigestTitle(3, 5)).toBe('📊 热点汇总：5 分钟内发现 3 条新热点');
+  });
+
+  it('buildManualDigestTitle formats manual scan summary', () => {
+    expect(buildManualDigestTitle(4)).toBe('📊 热点汇总：本次扫描发现 4 条新热点');
   });
 
   it('buildDigestContent truncates long lists', () => {
@@ -156,7 +162,7 @@ describe('tryFlushEmailWindow', () => {
   });
 
   it('does not send email before email window expires', async () => {
-    const notExpired = windowStart.getTime() + 10 * 60 * 1000;
+    const notExpired = windowStart.getTime() + 5 * 60 * 1000;
     const flushed = await tryFlushEmailWindow(notExpired);
     expect(flushed).toBe(false);
     expect(mockSendDigestEmail).not.toHaveBeenCalled();
@@ -169,6 +175,40 @@ describe('tryFlushEmailWindow', () => {
     const [hotspots, options] = mockSendDigestEmail.mock.calls[0];
     expect(hotspots).toHaveLength(2);
     expect(hotspots.every((h: { importance: string }) => ['high', 'urgent'].includes(h.importance))).toBe(true);
-    expect(options.windowMinutes).toBe(Math.round(EMAIL_WINDOW_MS / 60000));
+    expect(options.windowMinutes).toBe(10);
+  });
+});
+
+describe('flushManualScanUiNotifications', () => {
+  const io = { emit: vi.fn() } as any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrisma.notificationQueue.findMany.mockResolvedValue([
+      { id: 'q1', hotspotId: 'h1', manualBatchId: 'batch-1', uiFlushed: false },
+    ]);
+    mockPrisma.hotspot.findMany.mockResolvedValue([
+      { id: 'h1', title: 'Manual hit', source: 'twitter', importance: 'high' },
+    ]);
+    mockPrisma.notification.create.mockResolvedValue({ id: 'n1' });
+    mockPrisma.notificationQueue.updateMany.mockResolvedValue({ count: 1 });
+  });
+
+  it('flushes manual batch immediately without waiting for UI window', async () => {
+    const flushed = await flushManualScanUiNotifications(io, 'batch-1');
+    expect(flushed).toBe(true);
+    expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          title: buildManualDigestTitle(1),
+        }),
+      })
+    );
+    expect(io.emit).toHaveBeenCalledWith(
+      'notification',
+      expect.objectContaining({
+        content: '本次扫描发现 1 条新热点',
+      })
+    );
   });
 });

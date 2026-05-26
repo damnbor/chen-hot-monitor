@@ -1,14 +1,17 @@
 import type { Server } from 'socket.io';
 import { prisma } from '../db.js';
 import { sendDigestEmail } from './email.js';
+import { getScanState } from './scanState.js';
 
 const UI_WINDOW_START_KEY = 'notification_ui_window_start';
 const EMAIL_WINDOW_START_KEY = 'notification_email_window_start';
 
+/** 定时扫描 UI 通知聚合窗口（分钟） */
 export const UI_WINDOW_MS =
   parseInt(process.env.NOTIFICATION_UI_WINDOW_MINUTES || '5', 10) * 60 * 1000;
+/** 邮件汇总窗口（分钟） */
 export const EMAIL_WINDOW_MS =
-  parseInt(process.env.NOTIFICATION_EMAIL_WINDOW_MINUTES || '30', 10) * 60 * 1000;
+  parseInt(process.env.NOTIFICATION_EMAIL_WINDOW_MINUTES || '10', 10) * 60 * 1000;
 
 const EMAIL_IMPORTANCE = new Set(['high', 'urgent']);
 
@@ -23,6 +26,13 @@ type HotspotWithKeyword = {
   summary: string | null;
   createdAt: Date;
   keyword?: { text: string } | null;
+};
+
+type HotspotRow = {
+  id: string;
+  title: string;
+  source: string;
+  importance: string;
 };
 
 async function getSetting(key: string): Promise<string | null> {
@@ -48,6 +58,10 @@ export function isWindowExpired(windowStart: Date, windowMs: number, now = Date.
 
 export function buildDigestTitle(count: number, windowMinutes: number): string {
   return `📊 热点汇总：${windowMinutes} 分钟内发现 ${count} 条新热点`;
+}
+
+export function buildManualDigestTitle(count: number): string {
+  return `📊 热点汇总：本次扫描发现 ${count} 条新热点`;
 }
 
 export function buildDigestContent(
@@ -76,9 +90,16 @@ export async function enqueueHotspotNotification(
     io.emit('hotspot:new', hotspot);
   }
 
-  const uiWindowStart = await getSetting(UI_WINDOW_START_KEY);
-  if (!uiWindowStart) {
-    await setSetting(UI_WINDOW_START_KEY, new Date().toISOString());
+  const scan = getScanState();
+  const manualBatchId =
+    scan.status === 'running' && scan.manual ? scan.manualBatchId : null;
+
+  // 仅定时任务入队时启动 5 分钟 UI 窗口
+  if (!manualBatchId) {
+    const uiWindowStart = await getSetting(UI_WINDOW_START_KEY);
+    if (!uiWindowStart) {
+      await setSetting(UI_WINDOW_START_KEY, new Date().toISOString());
+    }
   }
 
   if (isEmailEligible(hotspot.importance)) {
@@ -94,20 +115,23 @@ export async function enqueueHotspotNotification(
       hotspotId: hotspot.id,
       importance: hotspot.importance,
       emailFlushed: !isEmailEligible(hotspot.importance),
+      manualBatchId,
     },
     update: {},
   });
 }
 
 async function resetUiWindowIfEmpty(): Promise<void> {
-  const remaining = await prisma.notificationQueue.count({ where: { uiFlushed: false } });
+  const remaining = await prisma.notificationQueue.count({
+    where: { uiFlushed: false, manualBatchId: null },
+  });
   if (remaining === 0) {
     await clearSetting(UI_WINDOW_START_KEY);
     return;
   }
 
   const first = await prisma.notificationQueue.findFirst({
-    where: { uiFlushed: false },
+    where: { uiFlushed: false, manualBatchId: null },
     orderBy: { enqueuedAt: 'asc' },
   });
   if (first) {
@@ -145,6 +169,38 @@ async function cleanupFlushedQueueItems(): Promise<void> {
   });
 }
 
+async function emitUiDigest(
+  io: Server | undefined,
+  hotspots: HotspotRow[],
+  options: { title: string; toastContent: string },
+  queueIds: string[]
+): Promise<void> {
+  if (hotspots.length === 0) return;
+
+  await prisma.notification.create({
+    data: {
+      type: 'hotspot_digest',
+      title: options.title,
+      content: buildDigestContent(hotspots),
+      hotspotId: hotspots[0].id,
+    },
+  });
+
+  io?.emit('notification', {
+    type: 'hotspot_digest',
+    title: '热点汇总',
+    content: options.toastContent,
+    count: hotspots.length,
+    hotspotIds: hotspots.map((h) => h.id),
+  });
+
+  await prisma.notificationQueue.updateMany({
+    where: { id: { in: queueIds } },
+    data: { uiFlushed: true },
+  });
+}
+
+/** 定时任务：5 分钟窗口到期后推送 UI 通知 */
 export async function tryFlushUiWindow(io?: Server, now = Date.now()): Promise<boolean> {
   const windowStartStr = await getSetting(UI_WINDOW_START_KEY);
   if (!windowStartStr) return false;
@@ -153,7 +209,7 @@ export async function tryFlushUiWindow(io?: Server, now = Date.now()): Promise<b
   if (!isWindowExpired(windowStart, UI_WINDOW_MS, now)) return false;
 
   const pending = await prisma.notificationQueue.findMany({
-    where: { uiFlushed: false },
+    where: { uiFlushed: false, manualBatchId: null },
     orderBy: { enqueuedAt: 'asc' },
   });
   if (pending.length === 0) {
@@ -169,35 +225,63 @@ export async function tryFlushUiWindow(io?: Server, now = Date.now()): Promise<b
 
   if (hotspots.length > 0) {
     const windowMinutes = Math.round(UI_WINDOW_MS / 60000);
-    const title = buildDigestTitle(hotspots.length, windowMinutes);
-    const content = buildDigestContent(hotspots);
-
-    await prisma.notification.create({
-      data: {
-        type: 'hotspot_digest',
-        title,
-        content,
-        hotspotId: hotspots[0].id,
+    await emitUiDigest(
+      io,
+      hotspots,
+      {
+        title: buildDigestTitle(hotspots.length, windowMinutes),
+        toastContent: `${windowMinutes} 分钟内发现 ${hotspots.length} 条新热点`,
       },
-    });
-
-    io?.emit('notification', {
-      type: 'hotspot_digest',
-      title: '热点汇总',
-      content: `${windowMinutes} 分钟内发现 ${hotspots.length} 条新热点`,
-      count: hotspots.length,
-      hotspotIds: hotspots.map((h) => h.id),
-    });
-
+      pending.map((p) => p.id)
+    );
     console.log(`📬 UI digest sent: ${hotspots.length} hotspot(s) in ${windowMinutes}min window`);
+  } else {
+    await prisma.notificationQueue.updateMany({
+      where: { id: { in: pending.map((p) => p.id) } },
+      data: { uiFlushed: true },
+    });
   }
 
-  await prisma.notificationQueue.updateMany({
-    where: { id: { in: pending.map((p) => p.id) } },
-    data: { uiFlushed: true },
+  await resetUiWindowIfEmpty();
+  return hotspots.length > 0;
+}
+
+/** 手动扫描结束/暂停：立即推送 UI 通知（与 Toast 一致） */
+export async function flushManualScanUiNotifications(
+  io: Server,
+  batchId: string
+): Promise<boolean> {
+  const pending = await prisma.notificationQueue.findMany({
+    where: { uiFlushed: false, manualBatchId: batchId },
+    orderBy: { enqueuedAt: 'asc' },
+  });
+  if (pending.length === 0) return false;
+
+  const hotspots = await prisma.hotspot.findMany({
+    where: { id: { in: pending.map((p) => p.hotspotId) } },
+    include: { keyword: true },
+    orderBy: { createdAt: 'desc' },
   });
 
-  await resetUiWindowIfEmpty();
+  if (hotspots.length === 0) {
+    await prisma.notificationQueue.updateMany({
+      where: { id: { in: pending.map((p) => p.id) } },
+      data: { uiFlushed: true },
+    });
+    return false;
+  }
+
+  await emitUiDigest(
+    io,
+    hotspots,
+    {
+      title: buildManualDigestTitle(hotspots.length),
+      toastContent: `本次扫描发现 ${hotspots.length} 条新热点`,
+    },
+    pending.map((p) => p.id)
+  );
+
+  console.log(`📬 Manual scan UI digest sent: ${hotspots.length} hotspot(s)`);
   return true;
 }
 
@@ -248,5 +332,13 @@ export async function tryFlushEmailWindow(now = Date.now()): Promise<boolean> {
 export async function tryFlushNotificationWindows(io?: Server, now = Date.now()): Promise<void> {
   await tryFlushUiWindow(io, now);
   await tryFlushEmailWindow(now);
+  await cleanupFlushedQueueItems();
+}
+
+export async function flushManualScanNotifications(
+  io: Server,
+  batchId: string
+): Promise<void> {
+  await flushManualScanUiNotifications(io, batchId);
   await cleanupFlushedQueueItems();
 }

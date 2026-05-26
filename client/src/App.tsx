@@ -154,11 +154,14 @@ function App() {
         if (state.status !== 'running') {
           setIsChecking(false);
           loadData();
-          if (state.status === 'paused') {
-            showToast(`扫描已暂停，已发现 ${state.newHotspotsFound} 条新热点`, 'success');
-          } else if (state.status === 'completed') {
-            showToast(`扫描完成，发现 ${state.newHotspotsFound} 条新热点`, 'success');
+          if (state.newHotspotsFound === 0) {
+            if (state.status === 'paused') {
+              showToast('扫描已暂停，未发现新热点', 'success');
+            } else if (state.status === 'completed') {
+              showToast('扫描完成，未发现新热点', 'success');
+            }
           }
+          // 有新热点时由 hotspot_digest WebSocket 推送 Toast，避免重复
         }
       } catch {
         // 忽略轮询错误

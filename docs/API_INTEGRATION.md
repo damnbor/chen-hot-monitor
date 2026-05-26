@@ -492,14 +492,15 @@ async function checkHotspots() {
 | 通道 | 窗口 | 行为 |
 |------|------|------|
 | `hotspot:new` (WebSocket) | 无 | **实时**更新前端热点列表，不 Toast |
-| UI 通知 + Toast | **5 分钟**（默认） | 窗口到期后 1 条 `hotspot_digest` 通知 |
-| SMTP 邮件 | **30 分钟**（默认） | 窗口到期后 1 封汇总邮件，**仅 high / urgent** |
+| UI 通知 + Toast（定时扫描） | **5 分钟**（默认） | 窗口到期后 1 条 `hotspot_digest` 通知 |
+| UI 通知 + Toast（立即扫描） | **立即** | 暂停或完成后立即 1 条 `hotspot_digest`（`本次扫描发现 N 条新热点`） |
+| SMTP 邮件 | **10 分钟**（默认） | 窗口到期后 1 封汇总邮件，**仅 high / urgent** |
 
 环境变量（`server/.env`）：
 
 ```env
 NOTIFICATION_UI_WINDOW_MINUTES=5
-NOTIFICATION_EMAIL_WINDOW_MINUTES=30
+NOTIFICATION_EMAIL_WINDOW_MINUTES=10
 ```
 
 ### 7.1 聚合流程
@@ -531,7 +532,7 @@ io.emit('notification', {
 ### 7.3 邮件汇总
 
 ```typescript
-await sendDigestEmail(highUrgentHotspots, { windowMinutes: 30 });
+await sendDigestEmail(highUrgentHotspots, { windowMinutes: 10 });
 ```
 
 仅包含窗口内 `importance` 为 `high` 或 `urgent` 的热点。

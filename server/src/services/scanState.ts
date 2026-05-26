@@ -1,9 +1,12 @@
+import { randomUUID } from 'crypto';
+
 export type ScanRunStatus = 'idle' | 'running' | 'paused' | 'completed';
 
 export interface HotspotScanState {
   status: ScanRunStatus;
   manual: boolean;
   pauseRequested: boolean;
+  manualBatchId: string | null;
   currentKeyword: string | null;
   keywordsTotal: number;
   keywordsProcessed: number;
@@ -16,6 +19,7 @@ const idleState = (): HotspotScanState => ({
   status: 'idle',
   manual: false,
   pauseRequested: false,
+  manualBatchId: null,
   currentKeyword: null,
   keywordsTotal: 0,
   keywordsProcessed: 0,
@@ -31,6 +35,10 @@ export function getScanState(): HotspotScanState {
   return { ...state };
 }
 
+export function getManualBatchId(): string | null {
+  return state.manualBatchId;
+}
+
 function beginScan(manual: boolean): boolean {
   if (isLocked) return false;
   isLocked = true;
@@ -38,6 +46,7 @@ function beginScan(manual: boolean): boolean {
     ...idleState(),
     status: 'running',
     manual,
+    manualBatchId: manual ? randomUUID() : null,
     startedAt: new Date().toISOString(),
   };
   return true;

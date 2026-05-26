@@ -3,13 +3,14 @@ import { prisma } from '../db.js';
 import { deduplicateResults } from '../services/search.js';
 import { analyzeContent, preMatchKeyword } from '../services/ai.js';
 import { gatherKeywordSearchContext } from '../services/sourceFetcher.js';
-import { enqueueHotspotNotification } from '../services/notificationAggregator.js';
+import { enqueueHotspotNotification, flushManualScanNotifications } from '../services/notificationAggregator.js';
 import {
   shouldAbortManualScan,
   updateScanProgress,
   finishScan,
   abortScanOnError,
   getScanState,
+  getManualBatchId,
 } from '../services/scanState.js';
 import type { SearchResult } from '../types.js';
 
@@ -251,12 +252,22 @@ export async function runHotspotCheck(
       console.log(`\n✨ Hotspot check completed. Found ${newHotspotsCount} new hotspots.`);
     }
 
+    const manualBatchId = manual ? getManualBatchId() : null;
     finishScan({ paused, newHotspotsFound: newHotspotsCount, keywordsProcessed });
+
+    if (manual && manualBatchId) {
+      await flushManualScanNotifications(io, manualBatchId);
+    }
+
     io.emit('scan:status', getScanState());
 
     return { paused, newHotspotsCount, keywordsProcessed };
   } catch (error) {
+    const manualBatchId = manual ? getManualBatchId() : null;
     abortScanOnError();
+    if (manual && manualBatchId) {
+      await flushManualScanNotifications(io, manualBatchId);
+    }
     io.emit('scan:status', getScanState());
     throw error;
   }

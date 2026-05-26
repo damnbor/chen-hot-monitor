@@ -131,7 +131,7 @@ httpServer.listen(PORT, async () => {
   📡 Server running on http://localhost:${PORT}
   🔌 WebSocket ready
   ⏰ Hotspot check scheduled every 30 minutes
-  📬 Notification digest: UI ${process.env.NOTIFICATION_UI_WINDOW_MINUTES || '5'}min / Email ${process.env.NOTIFICATION_EMAIL_WINDOW_MINUTES || '30'}min
+  📬 Notification digest: UI ${process.env.NOTIFICATION_UI_WINDOW_MINUTES || '5'}min / Email ${process.env.NOTIFICATION_EMAIL_WINDOW_MINUTES || '10'}min
   `);
   try {
     await tryFlushNotificationWindows(io);

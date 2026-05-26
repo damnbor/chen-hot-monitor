@@ -64,12 +64,14 @@ model Notification {
 }
 
 model NotificationQueue {
-  id           String   @id @default(uuid())
-  hotspotId    String   @unique
-  importance   String
-  enqueuedAt   DateTime @default(now())
-  uiFlushed    Boolean  @default(false)
-  emailFlushed Boolean  @default(false)
+  id             String   @id @default(uuid())
+  hotspotId      String   @unique
+  importance     String
+  enqueuedAt     DateTime @default(now())
+  uiFlushed      Boolean  @default(false)
+  emailFlushed   Boolean  @default(false)
+  /** 手动扫描批次 ID；null 表示定时任务，走 5 分钟聚合窗口 */
+  manualBatchId  String?
 }
 
 model Setting {

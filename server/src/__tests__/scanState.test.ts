@@ -22,6 +22,9 @@ describe('scanState', () => {
       manual: true,
       pauseRequested: false,
     });
+    expect(getScanState().manualBatchId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
   });
 
   it('rejects concurrent manual scan', () => {
