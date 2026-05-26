@@ -1,9 +1,8 @@
 import { Server } from 'socket.io';
 import { prisma } from '../db.js';
-import { searchTwitter } from '../services/twitter.js';
-import { searchBing, searchHackerNews, deduplicateResults } from '../services/search.js';
-import { searchSogou, searchBilibili, searchWeibo, detectAndFetchAccount } from '../services/chinaSearch.js';
-import { analyzeContent, expandKeyword, preMatchKeyword } from '../services/ai.js';
+import { deduplicateResults } from '../services/search.js';
+import { analyzeContent, preMatchKeyword } from '../services/ai.js';
+import { gatherKeywordSearchContext } from '../services/sourceFetcher.js';
 import { enqueueHotspotNotification } from '../services/notificationAggregator.js';
 import {
   shouldAbortManualScan,
@@ -90,62 +89,34 @@ export async function runHotspotCheck(
       console.log(`\n📎 Checking keyword: "${keyword.text}"`);
 
     try {
-      // 第一步：检测关键词是否为某个平台账号
-      console.log(`  🎯 Detecting account for "${keyword.text}"...`);
-      const accountResult = await detectAndFetchAccount(keyword.text);
-      
+      // 账号检测 + 关键词扩展 + 6 源抓取并行
+      console.log(`  🚀 Gathering account, expansion & sources in parallel...`);
+      const { accountResult, expandedKeywords, sourceFetch } =
+        await gatherKeywordSearchContext(keyword.text);
+
       if (accountResult.accounts.length > 0) {
         for (const acc of accountResult.accounts) {
           console.log(`  ✅ Found ${acc.platform} account: ${acc.name} (${acc.followers} followers)`);
         }
       }
 
-      // 第 1.5 步：Query Expansion（查询扩展）
-      console.log(`  🔍 Expanding keyword "${keyword.text}"...`);
-      const expandedKeywords = await expandKeyword(keyword.text);
-      console.log(`  📋 Expanded to ${expandedKeywords.length} variants: ${expandedKeywords.slice(0, 5).join(', ')}${expandedKeywords.length > 5 ? '...' : ''}`);
-
-      // 第二步：从多个来源获取数据（国际 + 国内并行请求）
-      const [
-        twitterResults,
-        bingResults,
-        hackernewsResults,
-        sogouResults,
-        bilibiliResults,
-        weiboResults
-      ] = await Promise.allSettled([
-        searchTwitter(keyword.text),
-        searchBing(keyword.text),
-        searchHackerNews(keyword.text),
-        searchSogou(keyword.text),
-        searchBilibili(keyword.text),
-        searchWeibo(keyword.text)
-      ]);
+      console.log(
+        `  📋 Expanded to ${expandedKeywords.length} variants: ${expandedKeywords.slice(0, 5).join(', ')}${expandedKeywords.length > 5 ? '...' : ''}`
+      );
 
       const allResults: SearchResult[] = [];
-      
-      // 优先添加账号检测到的最新内容
+
       if (accountResult.results.length > 0) {
         allResults.push(...accountResult.results);
         console.log(`  AccountFetch: ${accountResult.results.length} results`);
       }
 
-      const sources = [
-        { name: 'Twitter', result: twitterResults },
-        { name: 'Bing', result: bingResults },
-        { name: 'HackerNews', result: hackernewsResults },
-        { name: 'Sogou', result: sogouResults },
-        { name: 'Bilibili', result: bilibiliResults },
-        { name: 'Weibo', result: weiboResults }
-      ];
-
-      for (const source of sources) {
-        if (source.result.status === 'fulfilled') {
-          allResults.push(...source.result.value);
-          console.log(`  ${source.name}: ${source.result.value.length} results`);
-        } else {
-          console.log(`  ${source.name}: failed - ${source.result.reason}`);
-        }
+      allResults.push(...sourceFetch.results);
+      for (const name of sourceFetch.completedSources) {
+        console.log(`  ${name}: ${sourceFetch.sourceCounts[name] ?? 0} results`);
+      }
+      for (const name of sourceFetch.failedSources) {
+        console.log(`  ${name}: failed or empty`);
       }
 
       // 去重 → 新鲜度过滤 → 按来源优先级排序

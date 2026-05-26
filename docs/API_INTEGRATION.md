@@ -456,25 +456,30 @@ async function checkHotspots() {
   });
 
   for (const keyword of keywords) {
-    // 1. 从 Twitter 搜索
-    const tweets = await searchTwitter(keyword.text);
-    
-    // 2. 从 Bing 搜索
-    const webResults = await searchBing(keyword.text);
-    
-    // 3. AI 分析
-    for (const item of [...tweets, ...webResults]) {
-      const analysis = await analyzeHotspot(item.content);
-      
-      if (analysis.isReal && analysis.relevance > 60) {
-        // 4. 保存并通知
-        const hotspot = await saveHotspot(item, analysis, keyword);
-        notifyNewHotspot(hotspot);
-      }
+    // 账号检测 + 关键词扩展 + 6 源抓取并行（见 sourceFetcher.ts）
+    const { accountResult, expandedKeywords, sourceFetch } =
+      await gatherKeywordSearchContext(keyword.text);
+
+    const allResults = [
+      ...accountResult.results,
+      ...sourceFetch.results
+    ];
+
+    // AI 分析（逐条，与抓取并行阶段分离）
+    for (const item of allResults) {
+      const analysis = await analyzeContent(item, keyword.text, expandedKeywords);
+      // 过滤、入库、通知...
     }
   }
 }
 ```
+
+实现文件：`server/src/services/sourceFetcher.ts`
+
+| 函数 | 说明 |
+|------|------|
+| `fetchMonitorSources(query)` | 6 源 `Promise.allSettled` + 单源 25s 超时 |
+| `gatherKeywordSearchContext(keyword)` | 账号检测 + `expandKeyword` + `fetchMonitorSources` 三者 `Promise.all` |
 
 ---
 
